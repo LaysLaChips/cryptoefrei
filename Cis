@@ -1,0 +1,74 @@
+#!/bin/bash
+# postinstall.sh - Script de durcissement Debian 12 (CIS Level 2)
+# À exécuter après installation via preseed
+
+set -eux
+
+### 1. Suppression des paquets inutiles (services superflus)
+apt purge -y avahi-daemon cups xinetd nis rpcbind telnet ftp nfs-kernel-server \
+            isc-dhcp-server slapd samba snmpd rsync postfix apache2 bind9 vsftpd
+apt autoremove -y
+
+### 2. Activation et configuration d'AppArmor
+aapt install -y apparmor apparmor-profiles apparmor-utils
+systemctl enable apparmor
+
+### 3. Activation et configuration d'auditd
+apt install -y auditd audispd-plugins
+systemctl enable auditd
+
+### 4. Renforcement de SSH
+sed -i \
+    -e 's/^#\?PermitRootLogin.*/PermitRootLogin no/' \
+    -e 's/^#\?MaxAuthTries.*/MaxAuthTries 3/' \
+    -e 's/^#\?LoginGraceTime.*/LoginGraceTime 30/' \
+    -e 's/^#\?ClientAliveInterval.*/ClientAliveInterval 300/' \
+    -e 's/^#\?ClientAliveCountMax.*/ClientAliveCountMax 0/' \
+    -e 's/^#\?AllowTcpForwarding.*/AllowTcpForwarding no/' \
+    /etc/ssh/sshd_config
+systemctl restart ssh
+
+### 5. Durcissement kernel (CIS 3.x)
+cat <<EOF > /etc/sysctl.d/99-cis-hardening.conf
+net.ipv4.ip_forward = 0
+net.ipv4.conf.all.accept_redirects = 0
+net.ipv4.conf.all.send_redirects = 0
+net.ipv4.conf.all.rp_filter = 1
+net.ipv4.conf.default.rp_filter = 1
+net.ipv4.icmp_echo_ignore_broadcasts = 1
+net.ipv4.icmp_ignore_bogus_error_responses = 1
+kernel.kptr_restrict = 1
+kernel.randomize_va_space = 2
+EOF
+sysctl --system
+
+### 6. Blocage des modules noyau inutiles
+for mod in cramfs freevxfs jffs2 hfs hfsplus squashfs udf usb-storage firewire-core ; do
+  echo "install $mod /bin/false" >> "/etc/modprobe.d/disable-$mod.conf"
+  echo "blacklist $mod" >> "/etc/modprobe.d/disable-$mod.conf"
+done
+
+### 7. Configuration du firewall
+ufw default deny incoming
+ufw default allow outgoing
+ufw allow ssh
+ufw enable
+
+### 8. Permissions de sécurité sur les fichiers critiques
+chmod 600 /etc/shadow
+chmod 644 /etc/passwd
+chmod 600 /boot/grub/grub.cfg || true
+
+### 9. Interdiction d'exécution sur /tmp et /var/tmp (si pas déjà active via preseed)
+if ! grep -q '/tmp' /etc/fstab; then
+  echo 'tmpfs /tmp tmpfs defaults,nosuid,noexec,nodev 0 0' >> /etc/fstab
+fi
+if ! grep -q '/var/tmp' /etc/fstab; then
+  echo 'tmpfs /var/tmp tmpfs defaults,nosuid,noexec,nodev 0 0' >> /etc/fstab
+fi
+
+### 10. Nettoyage
+updatedb
+apt clean
+
+echo "Durcissement post-installation CIS Level 2 terminé. Redémarrage recommandé."
